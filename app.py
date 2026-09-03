@@ -2,27 +2,18 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-# Page Config
-st.set_page_config(page_title="Collections Dashboard", layout="wide")
+# Page Configuration
+st.set_page_config(page_title="Collections Daily Report", layout="wide")
 
-# Custom Styling for original UI matching
+# Custom CSS for Original Dashboard Design
 st.markdown("""
     <style>
-    /* Dark Sidebar Menu styling */
     [data-testid="stSidebar"] {
-        background-color: #0b132b;
+        background-color: #0d1b2a;
         color: white;
     }
     [data-testid="stSidebar"] * {
         color: white !important;
-    }
-    .main-header {
-        background-color: #1e293b;
-        color: white;
-        padding: 10px 15px;
-        border-radius: 4px;
-        font-weight: bold;
-        margin-bottom: 15px;
     }
     .kpi-row {
         background-color: #f8fafc;
@@ -32,8 +23,21 @@ st.markdown("""
         margin-bottom: 12px;
         font-size: 13px;
     }
+    .bucket-card {
+        background-color: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        padding: 12px;
+        margin-bottom: 10px;
+    }
+    .bucket-header {
+        font-size: 12px;
+        font-weight: bold;
+        color: #1e3a8a;
+        margin-bottom: 5px;
+    }
     .card-header-blue {
-        background-color: #1e3a8a;
+        background-color: #0f2b5c;
         color: white;
         padding: 6px 12px;
         font-weight: bold;
@@ -44,22 +48,17 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Sidebar - Complete Navigation menu matching screenshot
+# Sidebar Menu
 st.sidebar.markdown("### 📊 DASHBOARDS")
 page = st.sidebar.radio("", [
-    "👥 Team Performance",
-    "📈 Portfolio Analysis",
     "🎯 Daily Target",
-    "🔄 Daily Movement",
-    "📜 Balance History",
-    "📸 EOD Snapshot",
-    "🛣️ Officer Journey",
     "📊 Agent Performance"
 ])
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🛠️ TOOLS & DATA")
-uploaded_file = st.sidebar.file_uploader("📂 Import Historical / Data", type=["xlsx", "xls"])
+uploaded_main = st.sidebar.file_uploader("📂 Import Main Portfolio", type=["xlsx", "xls"])
+uploaded_update = st.sidebar.file_uploader("📤 Upload Update (Payments)", type=["xlsx", "xls"])
 
 @st.cache_data
 def load_data(file):
@@ -67,10 +66,10 @@ def load_data(file):
         return pd.read_excel(file)
     return None
 
-df = load_data(uploaded_file)
+df = load_data(uploaded_main)
+update_df = load_data(uploaded_update)
 
 if df is not None:
-    # Column classifications
     fixed_cols = ['customer_id', 'loan_id', 'remaining_principal', 'status', 
                   'cycle_name', 'Officer', 'Type', 'Non-Starter', 
                   'Principal Type', "Call Or Don't Call", 'Risk', 'Update']
@@ -78,26 +77,30 @@ if df is not None:
     date_cols = [col for col in df.columns if col not in fixed_cols]
     df['cycle_clean'] = df['cycle_name'].astype(str).str.upper().str.strip()
 
-    # Officer Multi-select filter
+    # Filter Officers
     all_officers = sorted(df['Officer'].dropna().unique().tolist())
     selected_officers = st.sidebar.multiselect("Filter Officers:", all_officers, default=all_officers)
     filtered_df = df[df['Officer'].isin(selected_officers)].copy()
 
-    selected_date = st.sidebar.selectbox("Select Date for Collections:", date_cols if date_cols else [None])
+    selected_date = st.sidebar.selectbox("Select Payment Date Column:", date_cols if date_cols else [None])
 
-    # Payment Column calculation
-    if selected_date and selected_date in filtered_df.columns:
+    # Calculate Payments from Upload Update or Selected Date Column
+    if update_df is not None and 'loan_id' in update_df.columns and 'paid_amount' in update_df.columns:
+        paid_map = update_df.groupby('loan_id')['paid_amount'].sum().to_dict()
+        filtered_df['payment_val'] = filtered_df['loan_id'].map(paid_map).fillna(0)
+    elif selected_date and selected_date in filtered_df.columns:
         filtered_df['payment_val'] = pd.to_numeric(filtered_df[selected_date], errors='coerce').fillna(0)
     else:
         filtered_df['payment_val'] = 0
 
-    # Page 1: Daily Target
+    # PAGE 1: DAILY TARGET
     if page == "🎯 Daily Target":
         total_target = filtered_df['remaining_principal'].sum()
         total_in = filtered_df['payment_val'].sum()
         remaining = total_target - total_in
         pct_target = (total_in / total_target * 100) if total_target > 0 else 0
 
+        # Global Top Bar
         st.markdown(f"""
         <div class="kpi-row">
             <b>TOTAL DAILY TARGET:</b> {total_target:,.0f} | 
@@ -109,34 +112,61 @@ if df is not None:
 
         col1, col2 = st.columns(2)
 
-        def build_daily_table(sub_data, title):
-            st.markdown(f"<div class='card-header-blue'>{title}</div>", unsafe_allow_html=True)
-            if sub_data.empty:
-                st.info("No Data Available")
+        def render_daily_bucket(sub_df, title_label, default_target_val):
+            # Upper Bucket Card
+            b_in = sub_df['payment_val'].sum()
+            
+            c_input, _ = st.columns([1, 1])
+            with c_input:
+                bucket_target = st.number_input(f"Target for {title_label} (EGP):", min_value=0.0, value=float(default_target_val), step=1000000.0)
+            
+            b_pct = (b_in / bucket_target * 100) if bucket_target > 0 else 0
+
+            st.markdown(f"""
+            <div class="bucket-card">
+                <div class="bucket-header">{title_label}</div>
+                <div style="font-size: 16px; font-weight: bold; color: #1e3a8a;">{bucket_target:,.2f}</div>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
+                    <div>
+                        <span style="font-size: 10px; color: #64748b;">IN TODAY</span><br>
+                        <span style="font-size: 18px; font-weight: bold; color: #16a34a;">{b_in:,.0f}</span>
+                    </div>
+                    <div style="text-align: right;">
+                        <span style="font-size: 10px; color: #64748b;">% TARGET</span><br>
+                        <span style="font-size: 18px; font-weight: bold; color: #dc2626;">{b_pct:.2f}%</span>
+                    </div>
+                </div>
+                <progress value="{min(b_pct, 100)}" max="100" style="width: 100%; height: 6px; margin-top: 5px;"></progress>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Table Header & Data
+            st.markdown(f"<div class='card-header-blue'>{title_label}</div>", unsafe_allow_html=True)
+            if sub_df.empty:
+                st.info("No records found.")
                 return
 
-            tbl = sub_data.groupby('Officer').agg(
-                TARGET_B=('remaining_principal', 'sum'),
+            tbl = sub_df.groupby('Officer').agg(
+                Principal=('remaining_principal', 'sum'),
                 DAILY_IN=('payment_val', 'sum'),
                 TOTAL_IN=('payment_val', 'sum'),
                 PAID_COUNT=('payment_val', lambda x: (x > 0).sum())
             ).reset_index()
 
-            tbl['REMAINING'] = tbl['TARGET_B'] - tbl['TOTAL_IN']
-            tbl['% TARGET'] = np.where(tbl['TARGET_B'] > 0, (tbl['TOTAL_IN'] / tbl['TARGET_B']) * 100, 0)
-            
+            tot_rem = tbl['Principal'].sum()
+            tbl['TARGET B'] = (tbl['Principal'] / tot_rem * bucket_target) if tot_rem > 0 else 0
+            tbl['REMAINING'] = tbl['TARGET B'] - tbl['TOTAL_IN']
+            tbl['% TARGET'] = np.where(tbl['TARGET B'] > 0, (tbl['TOTAL_IN'] / tbl['TARGET B']) * 100, 0)
+
             tbl = tbl.sort_values(by='% TARGET', ascending=False).reset_index(drop=True)
             tbl.index = tbl.index + 1
             tbl.index.name = '#'
 
             tbl.rename(columns={
                 'Officer': 'NAME',
-                'TARGET_B': 'TARGET B',
                 'DAILY_IN': 'DAILY IN',
                 'TOTAL_IN': 'TOTAL IN',
-                'PAID_COUNT': '# PAID',
-                'REMAINING': 'REMAINING',
-                '% TARGET': '% TARGET'
+                'PAID_COUNT': '# PAID'
             }, inplace=True)
 
             st.dataframe(
@@ -154,29 +184,29 @@ if df is not None:
 
         with col1:
             c1_df = filtered_df[filtered_df['cycle_clean'].str.contains('1|CYCLE-1', na=False)]
-            build_daily_table(c1_df, "C1 — BUCKET-1")
+            render_daily_bucket(c1_df, "C1 — BUCKET-1", 40000000.0)
 
         with col2:
             c2_df = filtered_df[filtered_df['cycle_clean'].str.contains('2|CYCLE-2|C16', na=False)]
-            build_daily_table(c2_df, "C16 — BUCKET-1")
+            render_daily_bucket(c2_df, "C16 — BUCKET-1", 10000000.0)
 
-    # Page 2: Agent Performance
+    # PAGE 2: AGENT PERFORMANCE
     elif page == "📊 Agent Performance":
         col1, col2 = st.columns(2)
 
-        def build_performance_table(sub_data, title):
-            st.markdown(f"<div class='card-header-blue'>{title}</div>", unsafe_allow_html=True)
-            if sub_data.empty:
-                st.info("No Data Available")
+        def render_performance_table(sub_df, title_label):
+            st.markdown(f"<div class='card-header-blue'>{title_label}</div>", unsafe_allow_html=True)
+            if sub_df.empty:
+                st.info("No records found.")
                 return
 
-            perf = sub_data.groupby('Officer').agg(
+            perf = sub_df.groupby('Officer').agg(
                 Principal=('remaining_principal', 'sum'),
                 Paid_Cases=('payment_val', lambda x: (x > 0).sum())
             ).reset_index()
 
-            total_p = perf['Principal'].sum()
-            perf['PRINCIPAL %'] = (perf['Principal'] / total_p * 100) if total_p > 0 else 0
+            tot_p = perf['Principal'].sum()
+            perf['PRINCIPAL %'] = (perf['Principal'] / tot_p * 100) if tot_p > 0 else 0
             perf = perf.sort_values(by='PRINCIPAL %', ascending=False).reset_index(drop=True)
 
             perf['RANK'] = perf.index + 1
@@ -201,15 +231,12 @@ if df is not None:
             )
 
         with col1:
-            c1_p = filtered_df[filtered_df['cycle_clean'].str.contains('1|CYCLE-1', na=False)]
-            build_performance_table(c1_p, "Cycle-1 / BUCKET-1")
+            c1_sub = filtered_df[filtered_df['cycle_clean'].str.contains('1|CYCLE-1', na=False)]
+            render_performance_table(c1_sub, "Cycle-1 / BUCKET-1")
 
         with col2:
-            c2_p = filtered_df[filtered_df['cycle_clean'].str.contains('2|CYCLE-2|C16', na=False)]
-            build_performance_table(c2_p, "Cycle-2 / BUCKET-1")
-
-    else:
-        st.info(f"Page **{page}** is ready for customization.")
+            c2_sub = filtered_df[filtered_df['cycle_clean'].str.contains('2|CYCLE-2|C16', na=False)]
+            render_performance_table(c2_sub, "Cycle-2 / BUCKET-1")
 
 else:
-    st.info("💡 Please upload an Excel file from the sidebar to display the Dashboard.")
+    st.info("💡 Please upload your Main Portfolio Excel sheet from the sidebar to activate the Dashboard.")
