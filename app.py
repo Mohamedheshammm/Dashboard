@@ -72,7 +72,7 @@ df = load_excel(uploaded_main)
 update_df = load_excel(uploaded_update)
 
 if df is not None:
-    # Identify dynamic date/payment columns
+    # Standardize Column Names and Identify Dynamic Date Columns
     fixed_cols = ['customer_id', 'loan_id', 'remaining_principal', 'status', 
                   'cycle_name', 'Officer', 'Type', 'Non-Starter', 
                   'Principal Type', "Call Or Don't Call", 'Risk', 'Update']
@@ -87,25 +87,41 @@ if df is not None:
 
     selected_date = st.sidebar.selectbox("Select Date for Collections:", date_cols if date_cols else [None])
 
-    # Smart Payment Resolution (Update File OR Selected Date Column)
+    # ------------------- ROBUST PAYMENT PROCESSING -------------------
     filtered_df['payment_val'] = 0.0
 
     if update_df is not None:
-        # Match loan_id ignoring case/spaces
-        loan_col = [c for c in update_df.columns if 'loan' in str(c).lower()]
-        if loan_col:
-            l_col = loan_col[0]
-            # Find payment/amount column automatically
-            amt_cols = [c for c in update_df.columns if c != l_col and pd.api.types.is_numeric_dtype(update_df[c])]
-            if amt_cols:
-                pay_col = amt_cols[-1]
-                update_df[pay_col] = pd.to_numeric(update_df[pay_col], errors='coerce').fillna(0)
-                pay_map = update_df.groupby(l_col)[pay_col].sum().to_dict()
-                filtered_df['payment_val'] = filtered_df['loan_id'].map(pay_map).fillna(0)
-    elif selected_date and selected_date in filtered_df.columns:
-        filtered_df['payment_val'] = pd.to_numeric(filtered_df[selected_date], errors='coerce').fillna(0)
+        # Find ID column in Update file (loan_id or customer_id)
+        id_col_update = None
+        for col in update_df.columns:
+            col_str = str(col).lower().replace("_", "").replace(" ", "")
+            if "loanid" in col_str or "loan" in col_str or "customerid" in col_str:
+                id_col_update = col
+                break
 
-    # Helper function for Target Distribution
+        # Find Numeric/Payment Amount column in Update file
+        pay_col_update = None
+        for col in update_df.columns:
+            if col != id_col_update:
+                converted = pd.to_numeric(update_df[col], errors='coerce')
+                if converted.notna().sum() > 0 and converted.sum() > 0:
+                    pay_col_update = col
+                    break
+
+        if id_col_update and pay_col_update:
+            # Clean IDs for precise matching
+            filtered_df['match_key'] = filtered_df['loan_id'].astype(str).str.strip().str.split('.').str[0]
+            update_df['match_key'] = update_df[id_col_update].astype(str).str.strip().str.split('.').str[0]
+            update_df['clean_amount'] = pd.to_numeric(update_df[pay_col_update], errors='coerce').fillna(0)
+
+            # Map payments to main portfolio
+            pay_map = update_df.groupby('match_key')['clean_amount'].sum().to_dict()
+            filtered_df['payment_val'] = filtered_df['match_key'].map(pay_map).fillna(0.0)
+
+    elif selected_date and selected_date in filtered_df.columns:
+        filtered_df['payment_val'] = pd.to_numeric(filtered_df[selected_date], errors='coerce').fillna(0.0)
+
+    # ------------------- HELPER DATA PROCESSOR -------------------
     def process_bucket_data(sub_df, target_val):
         if sub_df.empty:
             return pd.DataFrame(), 0, 0
@@ -145,7 +161,6 @@ if df is not None:
         remaining_all = total_target_all - total_in_all
         pct_all = (total_in_all / total_target_all * 100) if total_target_all > 0 else 0
 
-        # Global Top Summary Header
         st.markdown(f"""
         <div class="top-summary-bar">
             <b>TOTAL DAILY TARGET:</b> {total_target_all:,.0f} | 
