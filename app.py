@@ -72,56 +72,79 @@ df = load_excel(uploaded_main)
 update_df = load_excel(uploaded_update)
 
 if df is not None:
-    # Standardize Column Names and Identify Dynamic Date Columns
-    fixed_cols = ['customer_id', 'loan_id', 'remaining_principal', 'status', 
-                  'cycle_name', 'Officer', 'Type', 'Non-Starter', 
-                  'Principal Type', "Call Or Don't Call", 'Risk', 'Update']
+    # Clean Column Names in Main DF
+    df.columns = df.columns.astype(str).str.strip()
     
+    # Identify Main ID Column
+    main_id_col = None
+    for c in df.columns:
+        c_clean = c.lower().replace("_", "").replace(" ", "")
+        if c_clean in ["loanid", "id", "customerid", "contractid", "accountno"]:
+            main_id_col = c
+            break
+    if not main_id_col:
+        main_id_col = df.columns[0] # Fallback to first column
+
+    fixed_cols = [main_id_col, 'remaining_principal', 'status', 'cycle_name', 'Officer', 'Type']
     date_cols = [col for col in df.columns if col not in fixed_cols]
-    df['cycle_clean'] = df['cycle_name'].astype(str).str.upper().str.strip()
+    
+    # Cycle Cleaning
+    cycle_col = [c for c in df.columns if 'cycle' in c.lower()]
+    df['cycle_clean'] = df[cycle_col[0]].astype(str).str.upper().str.strip() if cycle_col else ""
 
     # Officer Filter
-    all_officers = sorted(df['Officer'].dropna().unique().tolist())
-    selected_officers = st.sidebar.multiselect("Filter Officers:", all_officers, default=all_officers)
-    filtered_df = df[df['Officer'].isin(selected_officers)].copy()
+    officer_col = [c for c in df.columns if 'officer' in c.lower() or 'agent' in c.lower()]
+    off_col_name = officer_col[0] if officer_col else 'Officer'
+    
+    if off_col_name in df.columns:
+        all_officers = sorted(df[off_col_name].dropna().unique().tolist())
+        selected_officers = st.sidebar.multiselect("Filter Officers:", all_officers, default=all_officers)
+        filtered_df = df[df[off_col_name].isin(selected_officers)].copy()
+    else:
+        filtered_df = df.copy()
 
     selected_date = st.sidebar.selectbox("Select Date for Collections:", date_cols if date_cols else [None])
 
-    # ------------------- ROBUST PAYMENT PROCESSING -------------------
+    # ------------------- FLEXIBLE PAYMENT MATCHING LOGIC -------------------
     filtered_df['payment_val'] = 0.0
 
     if update_df is not None:
-        # Find ID column in Update file (loan_id or customer_id)
-        id_col_update = None
-        for col in update_df.columns:
-            col_str = str(col).lower().replace("_", "").replace(" ", "")
-            if "loanid" in col_str or "loan" in col_str or "customerid" in col_str:
-                id_col_update = col
+        update_df.columns = update_df.columns.astype(str).str.strip()
+        
+        # 1. Detect ID Column in Update File
+        up_id_col = None
+        for c in update_df.columns:
+            c_clean = c.lower().replace("_", "").replace(" ", "")
+            if any(k in c_clean for k in ["loan", "id", "customer", "contract", "account"]):
+                up_id_col = c
                 break
+        if not up_id_col:
+            up_id_col = update_df.columns[0]
 
-        # Find Numeric/Payment Amount column in Update file
-        pay_col_update = None
-        for col in update_df.columns:
-            if col != id_col_update:
-                converted = pd.to_numeric(update_df[col], errors='coerce')
-                if converted.notna().sum() > 0 and converted.sum() > 0:
-                    pay_col_update = col
+        # 2. Detect Amount Column in Update File
+        up_amt_col = None
+        for c in update_df.columns:
+            if c != up_id_col:
+                numeric_vals = pd.to_numeric(update_df[c], errors='coerce')
+                if numeric_vals.fillna(0).sum() > 0:
+                    up_amt_col = c
                     break
 
-        if id_col_update and pay_col_update:
-            # Clean IDs for precise matching
-            filtered_df['match_key'] = filtered_df['loan_id'].astype(str).str.strip().str.split('.').str[0]
-            update_df['match_key'] = update_df[id_col_update].astype(str).str.strip().str.split('.').str[0]
-            update_df['clean_amount'] = pd.to_numeric(update_df[pay_col_update], errors='coerce').fillna(0)
+        # 3. Match and Aggregate
+        if up_id_col and up_amt_col:
+            # Normalize Keys to string without trailing decimals
+            filtered_df['key_str'] = filtered_df[main_id_col].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+            update_df['key_str'] = update_df[up_id_col].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+            update_df['amt_clean'] = pd.to_numeric(update_df[up_amt_col], errors='coerce').fillna(0)
 
-            # Map payments to main portfolio
-            pay_map = update_df.groupby('match_key')['clean_amount'].sum().to_dict()
-            filtered_df['payment_val'] = filtered_df['match_key'].map(pay_map).fillna(0.0)
-
+            # Map payments back to main dataset
+            pmt_map = update_df.groupby('key_str')['amt_clean'].sum().to_dict()
+            filtered_df['payment_val'] = filtered_df['key_str'].map(pmt_map).fillna(0.0)
+            
     elif selected_date and selected_date in filtered_df.columns:
         filtered_df['payment_val'] = pd.to_numeric(filtered_df[selected_date], errors='coerce').fillna(0.0)
 
-    # ------------------- HELPER DATA PROCESSOR -------------------
+    # Helper function for Target Distribution
     def process_bucket_data(sub_df, target_val):
         if sub_df.empty:
             return pd.DataFrame(), 0, 0
@@ -129,8 +152,11 @@ if df is not None:
         tot_in = sub_df['payment_val'].sum()
         pct_in = (tot_in / target_val * 100) if target_val > 0 else 0
 
-        tbl = sub_df.groupby('Officer').agg(
-            Principal=('remaining_principal', 'sum'),
+        prin_col = [c for c in sub_df.columns if 'principal' in c.lower() or 'rem' in c.lower()]
+        p_col = prin_col[0] if prin_col else sub_df.columns[2]
+
+        tbl = sub_df.groupby(off_col_name).agg(
+            Principal=(p_col, 'sum'),
             DAILY_IN=('payment_val', 'sum'),
             TOTAL_IN=('payment_val', 'sum'),
             PAID_COUNT=('payment_val', lambda x: (x > 0).sum())
@@ -146,7 +172,7 @@ if df is not None:
         tbl.index.name = '#'
 
         tbl.rename(columns={
-            'Officer': 'NAME',
+            off_col_name: 'NAME',
             'DAILY_IN': 'DAILY IN',
             'TOTAL_IN': 'TOTAL IN',
             'PAID_COUNT': '# PAID'
@@ -156,11 +182,15 @@ if df is not None:
 
     # ------------------- PAGE: DAILY TARGET -------------------
     if page == "🎯 Daily Target":
-        total_target_all = filtered_df['remaining_principal'].sum()
+        prin_cols = [c for c in filtered_df.columns if 'principal' in c.lower() or 'rem' in c.lower()]
+        p_main = prin_cols[0] if prin_cols else filtered_df.columns[2]
+
+        total_target_all = filtered_df[p_main].sum()
         total_in_all = filtered_df['payment_val'].sum()
         remaining_all = total_target_all - total_in_all
         pct_all = (total_in_all / total_target_all * 100) if total_target_all > 0 else 0
 
+        # Top Bar Summary
         st.markdown(f"""
         <div class="top-summary-bar">
             <b>TOTAL DAILY TARGET:</b> {total_target_all:,.0f} | 
@@ -174,7 +204,7 @@ if df is not None:
 
         with col1:
             t1 = st.number_input("Target for C1 — BUCKET-1 (EGP):", value=40000000.0, step=1000000.0)
-            c1_df = filtered_df[filtered_df['cycle_clean'].str.contains('1|CYCLE-1', na=False)]
+            c1_df = filtered_df[filtered_df['cycle_clean'].str.contains('1|C1|CYCLE-1', na=False)]
             tbl1, in1, pct1 = process_bucket_data(c1_df, t1)
 
             st.markdown(f"""
@@ -199,7 +229,7 @@ if df is not None:
 
         with col2:
             t2 = st.number_input("Target for C16 — BUCKET-1 (EGP):", value=10000000.0, step=1000000.0)
-            c2_df = filtered_df[filtered_df['cycle_clean'].str.contains('2|CYCLE-2|C16', na=False)]
+            c2_df = filtered_df[filtered_df['cycle_clean'].str.contains('16|C16|CYCLE-2|2', na=False)]
             tbl2, in2, pct2 = process_bucket_data(c2_df, t2)
 
             st.markdown(f"""
@@ -232,8 +262,11 @@ if df is not None:
                 st.info("No records found.")
                 return
 
-            perf = sub_df.groupby('Officer').agg(
-                Principal=('remaining_principal', 'sum'),
+            prin_cols = [c for c in sub_df.columns if 'principal' in c.lower() or 'rem' in c.lower()]
+            p_col = prin_cols[0] if prin_cols else sub_df.columns[2]
+
+            perf = sub_df.groupby(off_col_name).agg(
+                Principal=(p_col, 'sum'),
                 Paid_Cases=('payment_val', lambda x: (x > 0).sum())
             ).reset_index()
 
@@ -246,7 +279,7 @@ if df is not None:
             perf['DIFF $'] = perf['Principal'].diff().abs().fillna(0)
             perf['FROM TARGET (95%)'] = perf['PRINCIPAL %'] * 0.95
 
-            perf.rename(columns={'Officer': 'NAME', 'Paid_Cases': '# PAID'}, inplace=True)
+            perf.rename(columns={off_col_name: 'NAME', 'Paid_Cases': '# PAID'}, inplace=True)
             perf = perf[['NAME', 'PRINCIPAL %', 'RANK', 'DIFF %', 'DIFF $', 'FROM TARGET (95%)', '# PAID']]
 
             st.dataframe(
@@ -263,11 +296,11 @@ if df is not None:
             )
 
         with col1:
-            c1_sub = filtered_df[filtered_df['cycle_clean'].str.contains('1|CYCLE-1', na=False)]
+            c1_sub = filtered_df[filtered_df['cycle_clean'].str.contains('1|C1|CYCLE-1', na=False)]
             render_agent_perf(c1_sub, "Cycle-1 / BUCKET-1")
 
         with col2:
-            c2_sub = filtered_df[filtered_df['cycle_clean'].str.contains('2|CYCLE-2|C16', na=False)]
+            c2_sub = filtered_df[filtered_df['cycle_clean'].str.contains('16|C16|CYCLE-2|2', na=False)]
             render_agent_perf(c2_sub, "Cycle-2 / BUCKET-1")
 
     else:
