@@ -40,17 +40,21 @@ update_df = load_excel(uploaded_update)
 if df is not None:
     df.columns = df.columns.astype(str).str.strip()
     
-    # Detect Officer Name Column
+    # 1. Smart Detection for Officer/Collector Name Column (Excluding 'cycle')
     off_col_name = None
     for c in df.columns:
         c_clean = c.lower().replace("_", "").replace(" ", "")
-        if any(k in c_clean for k in ["officer", "agent", "collector", "user", "name"]):
+        if 'cycle' not in c_clean and any(k in c_clean for k in ["officer", "agent", "collector", "user", "name"]):
             off_col_name = c
             break
+            
     if not off_col_name:
-        off_col_name = df.columns[1]
+        for c in df.columns:
+            if 'cycle' not in c.lower() and df[c].dtype == 'object':
+                off_col_name = c
+                break
 
-    # Detect Loan ID Column in Main File
+    # 2. Detect Loan ID Column in Main File
     main_id_col = None
     for c in df.columns:
         c_clean = c.lower().replace("_", "").replace(" ", "")
@@ -60,11 +64,11 @@ if df is not None:
     if not main_id_col:
         main_id_col = df.columns[0]
 
-    # Detect Principal / Bucket Value Column
-    prin_cols = [c for c in df.columns if any(k in c.lower() for k in ['principal', 'rem', 'bal', 'amount', 'b1', 'bucket1'])]
+    # 3. Detect Principal / Balance Column
+    prin_cols = [c for c in df.columns if any(k in c.lower() for k in ['principal', 'rem', 'bal', 'amount'])]
     p_col = prin_cols[0] if prin_cols else df.columns[2]
 
-    # Detect Cycle Column
+    # 4. Detect Cycle Column
     cycle_col = next((c for c in df.columns if 'cycle' in c.lower()), None)
     df['cycle_clean'] = df[cycle_col].astype(str).str.upper().str.strip() if cycle_col else ""
 
@@ -72,7 +76,7 @@ if df is not None:
     filtered_df['payment_val'] = 0.0
     filtered_df['vf_cash_val'] = 0.0
 
-    # ------------------- MATCHING LOGIC FOR STATUS -------------------
+    # ------------------- MATCHING LOGIC FOR BUCKET 1 TO 7 -------------------
     if update_df is not None:
         update_df.columns = update_df.columns.astype(str).str.strip()
         
@@ -86,17 +90,18 @@ if df is not None:
         update_df['match_key'] = update_df[up_id_col].apply(norm_key)
 
         if status_col:
-            # Clean Status Text
             update_df['status_clean'] = update_df[status_col].astype(str).str.upper().str.strip()
             
-            # Cases considered PAID for Bucket 1
-            paid_keywords = ['SETTLED', 'PARTIAL', 'CURRENT', 'PAID', 'SETTLE']
-            pattern = '|'.join(paid_keywords)
+            # Accepts ALL Bucket payments (SETTLED, PARTIAL, BUCKET-1 to 7, CURRENT) except CANCELLED/UNPAID
+            # Pattern matches BUCKET-1, BUCKET-2, ..., BUCKET-7, SETTLED, PARTIAL, CURRENT
+            paid_pattern = r'SETTLED|PARTIAL|CURRENT|PAID|SETTLE|BUCKET-[1-7]|B[1-7]'
+            
+            paid_ids = set(update_df[
+                update_df['status_clean'].str.contains(paid_pattern, na=False) & 
+                ~update_df['status_clean'].str.contains('CANCEL', na=False)
+            ]['match_key'])
 
-            # Get Loan IDs that are paid
-            paid_ids = set(update_df[update_df['status_clean'].str.contains(pattern, na=False)]['match_key'])
-
-            # Calculate Payment Value (If paid, take Principal / Bucket 1 Value, else 0)
+            # Assign amount for paid accounts
             filtered_df['payment_val'] = np.where(
                 filtered_df['match_key'].isin(paid_ids),
                 pd.to_numeric(filtered_df[p_col], errors='coerce').fillna(0),
@@ -109,12 +114,11 @@ if df is not None:
             vf_map = update_df.groupby('match_key')['clean_vf'].sum().to_dict()
             filtered_df['vf_cash_val'] = filtered_df['match_key'].map(vf_map).fillna(0.0)
 
-        total_collected = filtered_df['payment_val'].sum()
-        st.sidebar.success(f"✅ Matching Completed! Total Collected: {total_collected:,.0f}")
+        st.sidebar.success(f"✅ Active Updates Matched! Total Collected: {filtered_df['payment_val'].sum():,.0f}")
 
-    # ------------------- TABLE GENERATION -------------------
+    # ------------------- TABLE BUILDER -------------------
     def process_bucket_data(sub_df, target_val):
-        if sub_df.empty:
+        if sub_df.empty or not off_col_name:
             return pd.DataFrame(), 0, 0, 0
 
         tot_in = sub_df['payment_val'].sum()
@@ -146,7 +150,7 @@ if df is not None:
 
         return tbl[['NAME', 'TARGET $', 'DAILY IN', '📲 VF CASH', 'TOTAL IN', 'REMAINING', '% TARGET']], tot_in, tot_vf, pct_in
 
-    # Render Bucket Tables
+    # Render Dashboard
     col1, col2 = st.columns(2)
     with col1:
         t1 = st.number_input("Target C1 (EGP):", value=31985781.0, step=100000.0)
